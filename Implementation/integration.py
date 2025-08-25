@@ -29,11 +29,14 @@ def push_to_firebase(label, confidence, latitude, longitude, coords):
 model = YOLO('C:\\F\\Sem-5\\Pothole-detection-yolo\\pothole-detection-yolo\\Implementation\\best.pt') 
 
 def get_real_gps():
-    g = geocoder.ip('me')
-    if g.ok:
-        return g.latlng[0], g.latlng[1]
-    else:
-        return None, None
+    try:
+        g = geocoder.ip('me', timeout=5)  # set a 5-second timeout
+        if g.ok and g.latlng:
+            return g.latlng[0], g.latlng[1]
+    except Exception as e:
+        print("GPS error:", e)
+    # fallback GPS if API fails
+    return 17.384, 78.4564
 
 def get_simulated_gps():
     latitude = 17.3850 + random.uniform(-0.01, 0.01)
@@ -91,8 +94,10 @@ def detect_potholes_image(image_path, save_output=True):
     return results
 
 # --- Real-Time Mode ---
-def detect_potholes_realtime(save_snapshot=True):
-    cap = cv2.VideoCapture(0) 
+def detect_potholes_realtime(conf_threshold=0.25, dark_threshold=30, max_dark_frames=15, save_snapshot=True):
+    cap = cv2.VideoCapture(0)
+    dark_frame_count = 0
+    no_detection_count = 0
     snapshot_taken = False
 
     if not cap.isOpened():
@@ -106,26 +111,36 @@ def detect_potholes_realtime(save_snapshot=True):
         if not ret:
             break
 
-        results = model(frame, conf=0.25)
-        annotated_frame = results[0].plot()
+        if frame.mean() < dark_threshold:
+            dark_frame_count += 1
+            print(f"⚠️ Camera dark for {dark_frame_count}/{max_dark_frames} frames")
+            if dark_frame_count >= max_dark_frames:
+                print("Camera dark for too long. Stopping detection.")
+                break
+            continue
+        else:
+            dark_frame_count = 0
 
+        results = model(frame, conf=conf_threshold)
+        annotated_frame = results[0].plot()
         cv2.imshow("Pothole Detection (YOLOv8)", annotated_frame)
 
-        for result in results:
-            for box in result.boxes:
+        if len(results[0].boxes) == 0:
+            no_detection_count += 1
+            if no_detection_count >= 20:
+                print("No detections for 20 frames. Stopping detection...")
+                break
+        else:
+            no_detection_count = 0
+            for box in results[0].boxes:
                 label = model.names[int(box.cls.item())]
                 confidence = box.conf.item()
                 coords = box.xyxy.tolist()
-
                 lat, lon = get_real_gps()
                 if lat is None or lon is None:
-                    print("⚠️ Could not fetch GPS, using simulated location")
                     lat, lon = get_simulated_gps()
-
                 push_to_firebase(label, confidence, lat, lon, coords)
-
                 print(f"Uploaded → Label: {label}, Conf: {confidence:.2f}, GPS: ({lat}, {lon})")
-
                 if save_snapshot and not snapshot_taken:
                     cv2.imwrite("detected_output.jpg", annotated_frame)
                     snapshot_taken = True
@@ -137,6 +152,7 @@ def detect_potholes_realtime(save_snapshot=True):
     cap.release()
     cv2.destroyAllWindows()
     plot_potholes_on_map()
+
 
 # --- Main selector ---
 if __name__ == "__main__":
